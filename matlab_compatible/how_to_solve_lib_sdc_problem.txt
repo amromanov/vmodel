@@ -1,0 +1,22 @@
+If you have errors during compilation about bad version of libstdc++.so.6 (in Linux) try
+to follow this instruction to solve it.  (Tested on Ubuntu 12.04 LTS).
+
+First find the system version of libstdc++.so.6.
+
+From the command line type:
+
+locate libstdc++.so.6
+
+My system version of libstdc was
+
+    /usr/lib/i386-linux-gnu/libstdc++.so.6
+
+Then replace the matlab libstdc version with a link to the system libstdc.
+
+From the command line type (replace [....] with you settings):
+
+cd [matlab_dir]/sys/os/glnx86 
+mv libstdc++.so.6 libstdc++.so.6-OLD 
+ln -s [your_system_version_of_libstdc] libstdc++.so.6
+
+

@@ -1,0 +1,32 @@
+Windows 7, virtual machine, Core i7
+MATLAB r2013a (8.1 ) bench result
+ 0.0766    0.1050    0.1037    0.2298    0.5215    0.3468
+
+
+Vmodel toolbox self-test report
+-------------------------------
+Code coverage test - passed
+Fixed-point math test - passed
+Multiclock simulation test - passed
+Multiclock simulation test - passed
+Simulation without clock - passed
+Configuration parameters test - passed
+Single clock simulation test - passed
+
+Test duration: 1245.271400 s
+
+Linux, Core i7
+MATLAB r2011b (7.13.0.564) bench result
+0.0689    0.0668    0.1311    0.1612    0.2563    0.7843
+
+Vmodel toolbox self-test report
+-------------------------------
+Code coverage test - passed
+Fixed-point math test - passed
+Multiclock simulation test - passed
+Multiclock simulation test - passed
+Simulation without clock - passed
+Configuration parameters test - passed
+Single clock simulation test - passed
+
+Test duration: 707.130939 s

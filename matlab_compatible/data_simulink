@@ -1,0 +1,354 @@
+//*********************vmodel MATLAB Verilog simulator******************
+//Moscow, Control Problems Department MIREA, 2009-2015
+//Authors: Karyakin D, Romanov A
+// 
+//Distributed under the GNU LGPL
+//**********************************************************************
+
+#define S_FUNCTION_NAME  %slink_mex_filename
+#define S_FUNCTION_LEVEL 2
+#define MATLAB_MEX_FILE
+
+#define INPUTS_COUNT %inputs_count
+#define OUTPUTS_COUNT %outputs_count
+#define TOP_NAME %top_name
+#define CLOCK %clock_name
+%define_type
+
+#include "simstruc.h"
+#include "math.h"
+
+%includes
+
+typedef WData uint32;
+typedef QData uint64;
+
+/*================*
+ * Build checking *
+ *================*/
+
+TOP_NAME *top;
+bool fInit = false;
+
+/* current clock state. 1 or 0. Changes twice in tact */
+int32_T clk_state = 1;
+
+/* default frequency in hz */
+int32_T freq_Hz = 10;
+
+/* last tact, which has been modeled */
+int32_T last_tact = 0;
+real_T freq_MHz;
+real_T sampleTime;
+
+/*variables for multiclocking mode*/
+#ifdef MULTICLOCK
+int clk_count=CLOCK_AMOUNT;
+real_T limit_time = 0;
+real_T cur_time = 0;
+bool clk_out[CLOCK_AMOUNT]={%clocks}; //clock state                                      
+real_T half_periods[CLOCK_AMOUNT]={%halfperiods};  //clock periods
+real_T init_time_vector[CLOCK_AMOUNT]={%timevectors};   //edge time vector
+real_T time_vector[CLOCK_AMOUNT];
+    #ifdef JITTER_SIM
+         real_T last_jitter;
+         real_T jitter_amp[CLOCK_AMOUNT]={%jitter_amp};  //jitter amplitude
+    #endif
+#endif
+
+#ifdef RCHG_PARAMS_OUT
+    uint32 rchg_total=0;     //Number of events when change could occure
+    uint32 rchg_count=0;     //Number of events when change occured
+#endif
+/*-------*/
+
+uint32 rnd_val=%random_seed;           //Random value for jitter
+uint32 rnd_chg_val=%random_seed;       //Random value for interal variable change
+
+//Generate random value with LFSR
+uint32 next_rnd_value(uint32 rand_val){
+    return (rand_val >> 1) ^ (uint32)(0 - (rand_val & 1u) & 0x80200003u);
+}
+
+//Generate change vector with defined probability
+uint32 chg_vector(uint32 mask, uint32 limit){
+    uint32 result;
+#ifdef RCHG_PARAMS_OUT
+    rchg_total++;   //Increment total event counter
+#endif
+    rnd_chg_val=next_rnd_value(rnd_chg_val);      //Generate new
+    if(rnd_chg_val<%r_chg_prob){
+#ifdef RCHG_PARAMS_OUT
+        rchg_count++;   //Increment changes counter
+#endif
+        result = rnd_chg_val&mask;      //If in lower then probability level return chg_vector (number of bit, that should be changed)         
+        if(result>limit)
+            result = limit;  
+        result = 1 << result;
+    } else
+        result = 0;                               //if higher return 0 (no changes at this cycle)
+    return result;
+}
+
+uint32 chg_addr(uint32 mask, uint32 limit){
+    uint32 result;
+    rnd_chg_val=next_rnd_value(rnd_chg_val);      //Generate new
+    result = rnd_chg_val&mask;      //If in lower then probability level return chg_vector (number of bit, that should be changed)         
+    if(result>limit)
+       result = 0;  
+    return result;
+}
+
+
+/* checking number of S-fcn parameters */
+#define MDL_CHECK_PARAMETERS
+static void mdlCheckParameters(SimStruct *S)
+{
+    int32_T i;
+
+#ifdef TYPE_A 
+    for (i = 0; i < 1; i++) {
+#else
+    for (i = 0; i < 2; i++) {
+#endif
+        real_T *pr;
+        int_T   el;
+        int_T   nEls;
+        if (mxIsEmpty(    ssGetSFcnParam(S,i)) ||
+            mxIsSparse(   ssGetSFcnParam(S,i)) ||
+            mxIsComplex(  ssGetSFcnParam(S,i)) ||
+            mxIsLogical(  ssGetSFcnParam(S,i)) ||
+            !mxIsNumeric( ssGetSFcnParam(S,i)) || 
+            !mxIsDouble(   ssGetSFcnParam(S,i)) ) {
+            ssSetErrorStatus(S,"Parameters must be real finite numbers");
+            return;
+        } 
+    }
+
+    if (mxGetNumberOfElements(ssGetSFcnParam(S, 0)) != 1) {
+        ssSetErrorStatus(S,"Invalid sample time specified");
+        return;
+    }
+    else
+    {
+        if (mxGetPr(ssGetSFcnParam(S, 0))[0] <= 0)
+        {
+            sampleTime = -1;
+        }
+        else
+        {
+            sampleTime = mxGetPr(ssGetSFcnParam(S, 0))[0];
+        }
+    }
+
+#ifndef TYPE_A
+    if (mxGetNumberOfElements(ssGetSFcnParam(S, 1)) != 1 || mxGetPr(ssGetSFcnParam(S, 0))[0] <= 0.0) {
+        ssSetErrorStatus(S,"Invalid freq specified");
+        return;
+    }
+    else
+    {
+      freq_MHz = mxGetPr(ssGetSFcnParam(S, 1))[0];
+    }
+#endif
+
+
+}
+
+/* Simulink calls this function before each new simulation */
+
+#define MDL_START
+
+void mdlStart(SimStruct *S)
+{
+  last_tact = 0;
+
+#ifdef MULTICLOCK
+  cur_time = 0;
+  for (int k=0; k<CLOCK_AMOUNT; k++)
+    time_vector[k]=init_time_vector[k]-0.25;  //Shifting init_time_vector by 0.25 of main clock to prevent metastability between Simulink samples and main clock
+#endif
+}
+
+/* function sets count and widths of inputs and outputs */
+
+static void mdlInitializeSizes(SimStruct *S)
+{
+#ifdef TYPE_A
+    ssSetNumSFcnParams(S, 1);
+#else
+    ssSetNumSFcnParams(S, 2);
+#endif
+    if (ssGetNumSFcnParams(S) != ssGetSFcnParamsCount(S)) {
+        return; /* Parameter mismatch will be reported by Simulink */
+    }
+    else
+    {
+        mdlCheckParameters(S);
+    }
+
+    int_T i;
+    if (!ssSetNumInputPorts(S, INPUTS_COUNT)) return;
+    
+    /* all inputs are double */
+    for (i=0; i<INPUTS_COUNT; i++)
+    {
+      ssSetInputPortWidth(S, i, 1);
+      ssSetInputPortDataType(S, i, SS_DOUBLE);
+      ssSetInputPortDirectFeedThrough( S, i, 1 );
+    }
+    
+    if (!ssSetNumOutputPorts(S,OUTPUTS_COUNT)) return;
+    
+    /* all outputs are uint32 */
+    for (i=0; i<OUTPUTS_COUNT; i++)
+    {
+      ssSetOutputPortWidth(S, i, 1);
+      ssSetOutputPortDataType(S, i, SS_UINT32);
+    }
+
+    ssSetNumSampleTimes(S, 1);
+
+    /* specify the sim state compliance to be same as a built-in block */
+    ssSetSimStateCompliance(S, USE_DEFAULT_SIM_STATE);
+
+    /* Take care when specifying exception free code - see sfuntmpl_doc.c */
+#ifdef CYGWIN_VMODEL
+    ssSetOptions(S,
+                 SS_OPTION_WORKS_WITH_CODE_REUSE |
+                 SS_OPTION_USE_TLC_WITH_ACCELERATOR);
+#else
+    ssSetOptions(S,
+                 SS_OPTION_WORKS_WITH_CODE_REUSE |
+                 SS_OPTION_EXCEPTION_FREE_CODE |
+                 SS_OPTION_USE_TLC_WITH_ACCELERATOR);
+#endif
+}
+
+
+static void mdlInitializeSampleTimes(SimStruct *S)
+{
+    ssSetSampleTime(S, 0, sampleTime);
+    ssSetOffsetTime(S, 0, 0.0);
+    ssSetModelReferenceSampleTimeDefaultInheritance(S); 
+}
+
+/* main function */
+static void mdlOutputs(SimStruct *S, int_T tid)
+{
+  uint32 k;  //Variable for interal memory change
+	/* check if TOP already created */
+  if (!fInit)
+  {
+    top = new TOP_NAME("top");
+    fInit = true;
+  }
+
+
+#ifdef TYPE_A  /* model without clock */
+  %set_inputs
+  top->eval();
+  //process random changes
+  %rnd_chg_interal
+
+  %set_outputs
+
+#endif
+
+#ifndef TYPE_A /* model with clock */
+
+#ifndef MULTICLOCK
+	/* cur_tact is current time (ssGetT) * 1000000 (freq in MHz) * 2 (top must be calculated twice each tact) */
+  uint32 cur_tact = (uint32)round(ssGetT(S) * 2000000 *freq_MHz); 
+
+  /* if top must be recalculated */
+
+      %set_inputs
+      top->eval();
+      %rnd_chg_interal
+
+      for (int32_T i = last_tact; i<cur_tact; i++)
+      {
+        clk_state = 1 - clk_state;
+        CLOCK = clk_state;
+        top->eval();
+        //process random changes
+        %rnd_chg_interal
+      }
+    
+      last_tact = cur_tact;
+#else
+  limit_time = ssGetT(S) * 1000000.0 * freq_MHz;
+
+      %set_inputs
+
+      top->eval();
+  
+      while (cur_time < limit_time){
+          cur_time=time_vector[0];  //searching min time for edge
+          for (int i=0; i<clk_count; i++){
+             if(cur_time>time_vector[i])
+                  cur_time=time_vector[i];
+          }
+          
+          if(cur_time > limit_time){   //if next edge is after time_limit then putting last point
+              top->eval();
+              //process random changes
+              %rnd_chg_interal
+              cur_time = limit_time;
+              break;
+          }
+
+          for (int i=0; i<clk_count;i++){         //changing clocks
+             if(time_vector[i]==cur_time){
+                 clk_out[i]=!clk_out[i];
+             } 
+          }
+
+          //Assigning clock signals
+          %clock_chg
+
+          //running verilator simulation
+          top->eval();
+          //process random changes
+          %rnd_chg_interal
+
+          for(int i=0; i<clk_count;i++){       
+             if(time_vector[i]==cur_time){
+                 time_vector[i]=time_vector[i]+half_periods[i];
+                 #ifdef JITTER_SIM
+                     rnd_val=next_rnd_value(rnd_val);
+                     last_jitter=int32_T(rnd_val);
+                     last_jitter=jitter_amp[i]*last_jitter;
+                     time_vector[i]=time_vector[i]+last_jitter; //adding random jitter to time_vector. Jitter_amp should be less then half of clk period
+                 #endif
+             }
+          }
+    }
+#endif
+
+  %set_outputs
+
+  
+
+  
+#endif
+
+
+}
+
+
+
+static void mdlTerminate(SimStruct *S)
+{
+#ifdef CODE_COVERAGE
+       VerilatedCov::write();  // Write coverage information
+#endif  
+}
+
+
+#ifdef  MATLAB_MEX_FILE    /* Is this file being compiled as a MEX-file? */
+#include "simulink.c"      /* MEX-file interface mechanism */
+#else
+#include "cg_sfun.h"       /* Code generation registration function */
+#endif

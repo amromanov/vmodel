@@ -1,0 +1,76 @@
+function [fpga_time] = t2f( sim_time, m, clock_name )
+%[fpga_time] = t2f( sim_time, m )
+%Converts simulation time into number of FPGA ticks
+%sim_time - simulation time
+%m - simulation time unit ('s','ms','us','ns','ps');
+%clock_name - name of FPGA clock, default main clock name
+%fpga_time - number of fpga ticks
+
+%%*********************vmodel MATLAB Verilog simulator******************
+%%Moscow, Control Problems Department MIREA, 2009-2015
+%%Authors: Karyakin D, Romanov A
+%%- 
+%%Distributed under the GNU LGPL
+%%**********************************************************************
+
+if (nargin < 2)
+    m='s';
+end
+
+if (nargin < 3)
+    clock_name = '';
+end
+
+%clock_names_case
+
+switch m
+    case 'ms'
+        k=10^3; 
+    case 'us'
+        k=10^6;
+    case 'ns'
+        k=10^9; 
+    case 'ps'
+        k=10^12;        
+    otherwise
+        k=1;  %by default time is measured in seconds
+end
+
+fpga_time = sim_time * fpga_freq / k;
+
+==== cut here ====
+
+%%*********************vmodel MATLAB Verilog simulator******************
+%%Moscow, Control Problems Department MIREA, 2009-2011
+%%Authors: Karyakin D, Romanov A
+%%- 
+%%Distributed under the GNU LGPL
+%%**********************************************************************
+
+function [ sim_time ] = f2t( fpga_time, m )
+%[ sim_time ] = f2t( fpga_time, m )
+%Converts number FPGA ticks into simulation time
+%fpga_time - number of tick to convert
+%m - simulation time unit ('s','ms','us','ns','ps');
+%sim_time - simulation time
+
+if (nargin == 1)
+    m='s';
+end
+
+fpga_freq=%freq; %fpga freq
+
+switch m
+    case 'ms'
+        k=10^3; 
+    case 'us'
+        k=10^6;
+    case 'ns'
+        k=10^9; 
+    case 'ps'
+        k=10^12;        
+    otherwise
+        k=1;  %by default time is measured in seconds
+end
+
+sim_time = fpga_time / fpga_freq * k;

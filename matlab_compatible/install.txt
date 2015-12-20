@@ -1,0 +1,24 @@
+Добавьте переменную среду WINDOWS (имя переменной без $)
+$SYSTEMC=c:\cygwin\opt\systemc-2.3
+$SYSTEMPERL=c:\cygwin\opt\SystemPerl
+$CYGWIN=nodosfilewarning
+перезагрузитесь
+
+Скачать и установит MATLAB + Simuling (никаких toolboxов)
+
+Скачать и установить Visual C++ Express с http://www.microsoft.com/express/Downloads/
+Скачать и установить Microsoft Windows SDK for Windows 7 and .NET Framework 4
+
+Запустите из MATLAB
+mex -setup 
+и следуя указаниям выберите Visual C++ Express как основное средство компиляции
+
+Скачать vmodel
+Запустить MATLAB из под администратора (требуется только при установке)
+Перейти в папку c:\cygwin\opt\v model
+
+install('c:\cygwin\opt\verilator\')\
+cd demo/test_bench/
+
+ЕСЛИ вы доставили SystemPerl после установки vmodel, то его над повторно проинсталировать
+

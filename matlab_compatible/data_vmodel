@@ -1,0 +1,612 @@
+//*********************vmodel MATLAB Verilog simulator******************
+//Moscow, Control Problems Department MIREA, 2009-2015
+//Authors: Karyakin D, Romanov A, Slaschov B
+//
+//Distributed under the GNU LGPL
+//**********************************************************************
+
+%defines
+
+#include "verilated.h"
+
+typedef WData uint32;
+typedef int64_T  int64;
+typedef QData uint64;
+typedef WData * puint32;
+typedef QData * puint64;
+typedef void* ptr;
+
+TOP_NAME *top;
+ptr* _out;
+//uses for check if TOP was already created
+bool fInit = false;
+int clock_signal = 1;
+double cur_tact=0;
+bool zero_time = false; // True if number_of_tacts = 0
+int64 point_id;
+int number_of_points; //number of points of simulation data
+/*variables for multiclocking mode*/
+double cur_time=0;
+double point_count=0;
+#ifdef MULTICLOCK
+int edge_write[CLOCK_AMOUNT]={%edges};
+int clk_count=CLOCK_AMOUNT;
+bool clk_out[CLOCK_AMOUNT]={%clocks}; //clock state                                      
+double half_periods[CLOCK_AMOUNT]={%halfperiods};  //clock periods
+double time_vector[CLOCK_AMOUNT]={%timevectors};   //edge time vector
+    #ifdef JITTER_SIM
+         uint32 current_seed;
+         double jitter_amp[CLOCK_AMOUNT]={%jitter_amp};  //jitter amplitude
+         double last_jitter;
+    #endif
+#endif
+
+#ifdef RCHG_PARAMS_OUT
+    uint32 rchg_total=0;     //Number of events when change could occure
+    uint32 rchg_count=0;     //Number of events when change occured
+#endif
+
+/*-------*/
+
+uint32 rnd_val=%random_seed;           //Random value for jitter
+uint32 rnd_chg_val=%random_seed;       //Random value for interal variable change
+
+/*
+// function checks inputs for type, dimensions all inputs must be non-complex doubles
+bool checkInput(const mxArray* arg, int sz)
+{
+  return !mxIsComplex(arg) && mxGetM(arg) == sz &&
+    mxGetN(arg) == 1;
+}
+*/
+
+//Generate random value with LFSR
+uint32 next_rnd_value(uint32 rand_val){
+    return (rand_val >> 1) ^ (uint32)((0 - (rand_val & 1u)) & 0x80200003u);
+}
+
+//Generate change vector with defined probability
+uint32 chg_vector(uint32 mask, uint32 limit){
+    uint32 result;
+#ifdef RCHG_PARAMS_OUT
+    rchg_total++;   //Increment total event counter
+#endif
+    rnd_chg_val=next_rnd_value(rnd_chg_val);      //Generate new
+    if(rnd_chg_val<%r_chg_prob){
+#ifdef RCHG_PARAMS_OUT
+        rchg_count++;   //Increment changes counter
+#endif
+        result = rnd_chg_val&mask;      //If in lower then probability level return chg_vector (number of bit, that should be changed)         
+        if(result>limit)
+            result = limit;  
+        result = 1 << result;
+    } else
+        result = 0;                               //if higher return 0 (no changes at this cycle)
+    return result;
+}
+
+uint32 chg_addr(uint32 mask, uint32 limit){
+    uint32 result;
+    rnd_chg_val=next_rnd_value(rnd_chg_val);      //Generate new
+    result = rnd_chg_val&mask;      //If in lower then probability level return chg_vector (number of bit, that should be changed)         
+    if(result>limit)
+       result = 0;  
+    return result;
+}
+
+
+// function for set inputs of TOP
+// input_ptr - pointer to TOP->input_name
+// input_size - size of one TOP->input_name. If input is an array 
+//      [65+ bits lengths], size of one element in this array (usually 32 bits)
+//      sizeof(TOP->input_name) must be passed here
+// arg - prhs[i], input matrice
+// sz - expected length of input matrice. (function checks lengths)
+// mem_sz - expected size for memory elements (1 for single wires)
+// array_len - number of elements, that should be assigned. Usually for inputs < 65 bits wide
+//      that is 1, for inputs 65+ bits wide is (input_width / 32) rounded up
+// force_explicit_cast - options, used for inputs 65+ bits wide. If 1 - EXPLICIT_CAST_FLOATS is ignored,
+//      input always simple assigned explicitly (with rounding to uint32)
+
+void assign_input(void* input_ptr, int input_size, const mxArray* arg, int sz, int mem_sz, int array_len, int force_explicit_cast)
+{
+    // check input
+    if (mxIsComplex(arg) || (mxGetM(arg) != sz) || (mxGetN(arg) != mem_sz))
+        mexErrMsgTxt("Invalid argument.");
+    void* pData = mxGetData(arg);
+    mxClassID data_class = mxGetClassID(arg);
+    
+    #ifdef EXPLICIT_CAST_FLOATS
+        force_explicit_cast = 1;
+    #endif
+    
+    int i;
+    QData tmp_val;
+
+    for (i = 0; i < array_len; i++)
+    {
+        switch (data_class)
+        {
+            case mxINT8_CLASS:
+            case mxUINT8_CLASS:
+                tmp_val = *((unsigned char*)pData + i);
+                break;
+            case mxINT16_CLASS:
+            case mxUINT16_CLASS:
+                tmp_val = *((unsigned short*)pData + i);
+                break;  
+            case mxINT32_CLASS:
+            case mxUINT32_CLASS:
+                tmp_val = *((WData*)pData + i);
+                break;
+            case mxINT64_CLASS:
+            case mxUINT64_CLASS:
+                tmp_val = *((QData*)pData + i);
+                break;
+            case mxSINGLE_CLASS:
+                if (force_explicit_cast)
+                    tmp_val = *((float*)pData + i);
+                else
+                    tmp_val = *((WData*)pData + i);
+                break;
+            case mxDOUBLE_CLASS:
+                if (force_explicit_cast)
+                    tmp_val = *((double*)pData + i);
+                else
+                {
+                    tmp_val = *((QData*)pData + i);
+                    if (input_size <= 4)
+                        tmp_val = tmp_val >> 32;
+                }
+                break;
+            default:
+                mexErrMsgTxt("Invalid type of input argument.");
+        }
+
+        switch (input_size)
+        {
+            case 1:
+                *((unsigned char*)input_ptr + i) = (unsigned char)tmp_val;
+                break;
+            case 2:
+                *((unsigned short*)input_ptr + i) = (unsigned short)tmp_val;
+                break;
+            case 4:
+                *((WData*)input_ptr + i) = (WData)tmp_val;
+                break;
+            case 8:
+                *((QData*)input_ptr + i) = tmp_val;
+                break;
+            default:
+                mexErrMsgTxt("Invalid size of 'TOP' object.");
+        }
+    }
+}
+
+bool is_point_for_output(double a)
+{
+#ifndef MULTICLOCK
+    double r;
+    r=remainder(a,2.0);
+	#ifdef ANY_EDGE
+        return ((r==0) || (r==1.0) || (r==-1.0));
+	#endif
+    return (r==0);
+#else
+    return 1;           //In multiclock mode last point is always added automatically
+#endif
+}
+
+void createOutputMatrices(mxArray *plhs[])
+{
+  // function creates array of output matrices.
+  // for 32bit outputs 1 x N int32 matrix
+  // for 64bit outputs 1 x N int64 matrix
+  // for 32*z bit outputs z x N int32 matrix
+  %inputs_description
+  _out = new ptr[OUTPUT_COUNT];
+  mwSize dims[3];
+  dims[0] = number_of_points;
+
+// if clock_signal signal is present, then we have OUTPUT_COUNT - 1 module outputs
+// and last output is current time
+// if there is no clock_signal, then we have OUTPUT_COUNT module outputs
+#ifdef TYPE_A
+  for (int i=0; i<OUTPUT_COUNT; i++)
+#else
+  for (int i=0; i<OUTPUT_COUNT-1; i++)
+#endif
+  {
+    int mem_size; //depth of memory
+    int out_size; //width of output in 32-bits blocks
+    mem_size = o_sz[i*2];
+    out_size = o_sz[i*2+1];
+    if (out_size < 3)
+    {
+      dims[1] = mem_size;
+      dims[2] = 1;
+    }
+    else
+    {
+      if (mem_size > 1)
+      {
+        dims[2] = mem_size;
+        dims[1] = out_size;
+      }
+      else
+      {
+        dims[1] = 1;
+        dims[2] = out_size;
+      }
+    }
+    if (out_size == 2)
+        plhs[i] = mxCreateNumericArray(3, dims, mxUINT64_CLASS, mxREAL);
+    else
+        plhs[i] = mxCreateNumericArray(3, dims, mxUINT32_CLASS, mxREAL);
+    _out[i] = mxGetPr(plhs[i]);
+  }
+  #ifndef TYPE_A
+  plhs[OUTPUT_COUNT-1] = mxCreateNumericMatrix(number_of_points, 1, mxDOUBLE_CLASS, mxREAL);
+  _out[OUTPUT_COUNT-1] = mxGetPr(plhs[OUTPUT_COUNT-1]);
+  #endif
+}
+
+void set_outputs()
+{
+  int j;
+
+%set_outputs
+#ifndef TYPE_A
+  #ifdef MULTICLOCK
+    ((double*)_out[OUTPUT_COUNT-1])[point_id] = cur_time*2;
+  #else
+	((double*)_out[OUTPUT_COUNT-1])[point_id] = cur_tact;
+  #endif
+#endif
+
+  point_id++;
+}
+
+// main function
+void mexFunction( int nlhs, mxArray *plhs[],
+                  int nrhs, const mxArray *prhs[] )
+{
+    int j;
+    int k;
+    bool save_result=0; //flag for results pocessing in multiclock mode
+
+// inputs_description contains info about sizes of each input and output
+
+%inputs_description
+	bool out_needed;
+  point_id = 0;
+
+  // for >64 bit inputs
+  double* in_data;
+
+	// nrhs is number of input arguments of mex-function
+  if(nrhs!=INPUT_COUNT)
+  {
+    mexErrMsgTxt("No input required.");
+    return;
+  }
+
+  // nlhs is number of output arguments of mex-function.
+  // if nlhs == 0, we suppose, function doesn't returns any data
+  // otherwise nlhs must be same, as number of outputs of our model
+  out_needed = nlhs > 0;
+	if(out_needed && nlhs != OUTPUT_COUNT) {
+    mexErrMsgTxt("Too many output arguments.");
+    return;
+  }
+/*
+	// check all inputs for datatype and size. i_sz described in inputs_description section
+  for (int i=0; i<INPUT_COUNT; i++)
+  {
+    if (!checkInput(prhs[i], i_sz[i]))
+    {
+      mexErrMsgTxt("Invalid argument");
+      break;
+    }
+  }
+*/
+
+  // init TOP object if first run
+	if (!fInit)
+  {
+    top = new TOP_NAME("top");
+    #ifndef TYPE_A
+      CLOCK = 0;
+    #endif
+    fInit = true;
+  }
+
+  //set inputs
+%set_inputs
+
+  top->eval();
+  
+  //process random changes
+  %rnd_chg_interal
+
+//******************************************************************************************
+#ifdef TYPE_A //without clock_signal
+  if (out_needed)
+  {
+    number_of_points = 1;
+    createOutputMatrices(plhs);
+    set_outputs();
+	}
+#else
+  int64 last_modeled_front;
+  int64 last_front_to_model;
+  int64 fronts_count;
+#ifndef MULTICLOCK
+  double number_of_tacts = mxGetScalar(prhs[INPUT_COUNT - 1]); // number of tacts guy wants to model
+  bool simulate_till_condition = (number_of_tacts < 0); // true if guy wants to model until condition
+  bool flag_condition = 0;
+  if (simulate_till_condition)
+    number_of_tacts = -number_of_tacts;
+  zero_time = (number_of_tacts == 0);
+  double end_tact = cur_tact + number_of_tacts;
+  last_modeled_front = floor(cur_tact);
+  last_front_to_model = floor(end_tact);
+  fronts_count = last_front_to_model - last_modeled_front;
+#else
+  double limit_time = mxGetScalar(prhs[INPUT_COUNT - 1])/2; // number of tacts guy wants to model
+  bool simulate_till_condition = (limit_time < 0); // true if guy wants to model until condition
+  bool flag_condition = 0;
+  double initial_time;
+  double end_tact = cur_tact+limit_time;
+  if (simulate_till_condition)
+    limit_time = -limit_time;
+  limit_time = cur_time + limit_time;
+#endif
+
+	if (out_needed)
+	{
+    if (simulate_till_condition || zero_time){
+      number_of_points = 1;
+    } else {
+#ifndef MULTICLOCK
+          #ifdef ANY_EDGE
+            number_of_points = fronts_count;
+          #else
+            if ((last_modeled_front & 1) == 1) 
+              number_of_points = (fronts_count + 1) >> 1;
+            else
+              number_of_points = fronts_count >> 1;
+          #endif
+          #ifdef FIRST_POINT
+            number_of_points++;
+          #endif
+          if (!is_point_for_output(end_tact))
+            number_of_points++;
+    }
+    createOutputMatrices(plhs);
+#else
+        #ifdef JITTER_SIM
+            current_seed=rnd_val;
+        #endif
+
+        #ifdef FIRST_POINT
+            point_count++;
+        #endif
+        initial_time = cur_time;            //Saving time at the begining of modeling cycle
+        bool init_clk_out[CLOCK_AMOUNT];
+        double init_time_vector[CLOCK_AMOUNT];
+        memcpy(&init_time_vector,&time_vector,sizeof(time_vector));// init_time_vector = time_vector;
+        memcpy(&init_clk_out,&clk_out,sizeof(clk_out));
+        while(cur_time < limit_time){
+            cur_time=time_vector[0];  //searchin min time for edge
+            for(int i=0; i<clk_count;i++){
+               if(cur_time>time_vector[i])
+                    cur_time=time_vector[i];
+            }
+            if(cur_time > limit_time) {  //if next edge is after time_limit then putting last point
+                point_count=point_count+1;
+                cur_time = limit_time;
+                break;
+            }
+            save_result=0;
+            for (int i=0; i<clk_count;i++){         //saving result and changing time vector
+               if(time_vector[i]==cur_time){
+                   clk_out[i]=1-clk_out[i];
+                   if(((edge_write[i]==1)&&(!clk_out[i]))|| ((edge_write[i]==2)&&(clk_out[i])) ||(edge_write[i]==3)) {                       //anyedge write
+                        save_result=1;
+                   }
+                   time_vector[i]=time_vector[i]+half_periods[i];
+                   #ifdef JITTER_SIM
+                       rnd_val=next_rnd_value(rnd_val);
+                       last_jitter=int32_T(rnd_val);
+                       last_jitter=jitter_amp[i]*(last_jitter);
+                       time_vector[i]=time_vector[i]+last_jitter;  //adding random jitter to time_vector. Jitter_amp should be less then half of clk period
+                   #endif
+               }
+            }
+            point_count=point_count+save_result;
+        }
+        end_tact=cur_time;
+        memcpy(&time_vector,&init_time_vector,sizeof(time_vector)); // init_time_vector = time_vector;
+        memcpy(&clk_out,&init_clk_out,sizeof(clk_out));
+        number_of_points=point_count;
+    }
+    createOutputMatrices(plhs);
+    point_count=0;
+    cur_time=initial_time;          //Restoring initial time after number_of_points was calculated
+        #ifdef JITTER_SIM
+            rnd_val=current_seed;   //Restoring initial random seed after number_of_points was calculated
+        #endif
+    #endif
+	}
+			
+	//simulate current point
+	if (simulate_till_condition)
+	{
+	  if (BREAK_CONDITION)
+	  {
+	    if (out_needed)
+          set_outputs();
+      flag_condition = 1;
+	  }
+	}
+	else
+  {
+    #ifdef FIRST_POINT
+      if (out_needed && !zero_time){
+            set_outputs();
+      }
+    #endif
+  }
+
+	//simulate all fronts
+    cur_time=0;
+	if (flag_condition == 0)
+	{
+#ifndef MULTICLOCK
+	  for(int64 i=last_modeled_front + 1; i<=last_front_to_model; i++)
+	  {
+	    clock_signal = 1 - clock_signal;
+	    CLOCK = clock_signal;
+	    cur_tact = i;
+	    top->eval();
+
+        //process random changes
+        %rnd_chg_interal
+
+
+	    if (simulate_till_condition)
+	    {
+	      if (BREAK_CONDITION)
+	      {
+	        if (out_needed)
+            set_outputs();
+          flag_condition = 1;
+          break;
+	      }
+	    }
+	    else
+	    {
+	      if (out_needed)
+	      {
+	        #ifdef ANY_EDGE
+            set_outputs();
+	        #else
+            if (clock_signal == 1)
+              set_outputs();
+	        #endif
+	      }
+	    }
+	  }
+      #else
+      while (cur_time < limit_time){
+      cur_time=time_vector[0];  //searchin min time for edge
+      for (int i=0; i<clk_count;i++){
+         if(cur_time>time_vector[i])
+              cur_time=time_vector[i];
+      }
+      if(cur_time > limit_time){   //if next edge is after time_limit then putting last point
+          top->eval();
+          //process random changes
+          %rnd_chg_interal
+  
+          cur_time = limit_time;
+          cur_tact = cur_time;
+
+          if (out_needed)           //Saving last point of simulation in case it's not edge time
+              set_outputs();
+          break;
+      }
+
+      for (int i=0; i<clk_count;i++){         //changing clocks
+         if(time_vector[i]==cur_time){
+             clk_out[i]=!clk_out[i];
+         } 
+      }
+
+      //Assigning clock signals
+      %clock_chg
+
+      //running verilator simulation
+      top->eval();
+      //process random changes
+      %rnd_chg_interal
+
+      save_result=0;
+      for(int i=0; i<clk_count;i++){       //saving result and changing time vector
+         if(time_vector[i]==cur_time){
+             if(((edge_write[i]==1)&&(!clk_out[i]))||((edge_write[i]==2)&&(clk_out[i])) || (edge_write[i]==3)){                        //anyedge write
+                 save_result=1;
+             }
+             time_vector[i]=time_vector[i]+half_periods[i];
+             #ifdef JITTER_SIM
+                 rnd_val=next_rnd_value(rnd_val);
+                 last_jitter=int32_T(rnd_val);
+                 last_jitter=jitter_amp[i]*last_jitter;
+                 time_vector[i]=time_vector[i]+last_jitter; //adding random jitter to time_vector. Jitter_amp should be less then half of clk period
+             #endif
+         }
+      }
+
+      cur_tact=cur_time;
+
+      if (simulate_till_condition)
+	  {
+	      if (BREAK_CONDITION)
+	      {
+ 	        if (out_needed)
+                set_outputs();
+            flag_condition = 1;
+            break;
+	      }
+	  } else {
+          if(save_result){
+             if (out_needed) 
+                set_outputs();
+          }
+        }
+      }
+#endif
+	}
+	
+	//simulate last point if needed
+    /* a = simulate_till_condition
+       b = flag_condition
+       c = is_point_for_output
+       d = zero_time
+       res = simulate last point
+    
+    Truth table:
+    a | b | c | d | res
+    --+---+---+---+----
+    x | x | x | 1 | 1  // if zero_time we must simulate last point anyway
+    1 | 0 | x | 0 | 1  // if we are simulating till condition and condition is false, we must simulate last point
+    1 | 1 | x | 0 | 0  // if we are simulating till condition and condition is true, we must not simulate last point
+    0 | 0 | 0 | 0 | 1  // if last point is not point for output, we must add it
+    0 | 0 | 1 | 0 | 0  // if last point is point for output, it has been already simulated and we don't need to simulate it once more
+    0 | 1 | x | 0 | -  // impossible. if simulate_till_condition is false, flag_condition always is false
+    so res = ((a and not b) or (not a and not c) or d)
+    */
+
+	if ((simulate_till_condition && (!flag_condition)) || ((!simulate_till_condition) && (!is_point_for_output(end_tact))) || zero_time)
+	{
+	  cur_tact = end_tact;
+	  if (out_needed){
+        set_outputs();
+      }
+	}
+#endif
+//******************************************************************************************
+
+
+#ifdef CODE_COVERAGE
+    if (zero_time&&(!out_needed)){
+       VerilatedCov::write();  // Write coverage information
+    }
+#endif
+
+  if (out_needed)
+  	delete[] _out;
+
+}
+
