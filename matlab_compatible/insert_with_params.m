@@ -196,7 +196,6 @@ end
                 plist{cnt}.name = param{1}.n;
                 plist{cnt}.value = param{1}.v;
             end
-            fprintf('%3d:  name=%s  value=%s\n', cnt, plist{cnt}.name, plist{cnt}.value);
             cnt = cnt + 1;
         end
     end
@@ -231,7 +230,6 @@ end
                 ilist{cnt}.inout_type = inout_type;
                 ilist{cnt}.brackets   = param{1}.b;
             end
-            fprintf('%3d:  name=%s  value=%s\n', cnt, plist{cnt}.name, plist{cnt}.value);
             cnt = cnt + 1;
         end
         
