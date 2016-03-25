@@ -1,8 +1,13 @@
-function [] = insert_with_params( input_fname, output_fname, module_params )
-%INSERT_WITH_PARAMS Function creates TOP module with required params
+function insert_with_params( input_fname, output_fname, module_params, top_module)
+% function insert_with_params( input_fname, output_fname, module_params, top_module)
+% INSERT_WITH_PARAMS Function creates parameterized TOP module
+% Required params
 %   INPUT_FNAME - name of input file (with extention)
 %   OUTPUT_FNAME - name of output file (with extention)
 %   MODULE_PARAMS - struct with module's parameters
+% Additional parameter
+%   TOP_MODULE - the name of the top module in the file INPUT_FNAME
+%  
 %   each field of module_params is considered as a pair parameter-value, 
 %   where name of the field is name of parameter, and value of the field
 %   is value of parameter. All parameters, that are presend in
@@ -17,6 +22,11 @@ function [] = insert_with_params( input_fname, output_fname, module_params )
 
 
 %% check for input number
+
+if(nargin<4)
+    top_module = [];
+end
+    
 if(nargin<3)
     module_params=[];
 end
@@ -35,13 +45,13 @@ end
 	s = fscanf(handle, '%c', inf);
 	fclose(handle);
     
-%% delete all comments, defines, extract pure header till semicolon
+%% delete all comments, defines, extract pure source
     % state machine: 0 - normal, 1 - after slash, 2 - after /*, 
     % 3 - after //, 4 - after /**, 5 - after `
     
     state = 0;
-    header = blanks(length(s)); % destination string
-    header_index = 1;  % last written character
+    source = blanks(length(s)); % destination string
+    source_index = 1;  % last written character
 
     % state machine
     for i = 1:length(s)
@@ -49,20 +59,16 @@ end
             case 0
                 if (s(i) == '/') %maybe starts comment
                     state = 1;
-                elseif (s(i) == '`') %start of define
-                    state = 5;
-                elseif (s(i) == ';') % end of header
-                    break;
                 elseif ( (s(i) == char(13)) || (s(i) == char(10)) ) %new line
-                    header(header_index) = ' ';
-                    header_index = header_index + 1;
+                    source(source_index) = ' ';
+                    source_index = source_index + 1;
                 else %plain text
                     if(s(i)==9)
-                        header(header_index) = ' ';     %Changing tabs into spaces
+                        source(source_index) = ' ';     %Changing tabs into spaces
                     else
-                        header(header_index) = s(i);
+                        source(source_index) = s(i);
                     end
-                    header_index = header_index + 1;
+                    source_index = source_index + 1;
                 end
             case 1
                 if (s(i) == '*') % multiline (/*) comment starts
@@ -70,13 +76,13 @@ end
                 elseif (s(i) == '/') % single-line (//) comment starts
                     state = 3;
                 elseif ( (s(i) == char(13)) || (s(i) == char(10)) ) % new line, no comment starts
-                    header(header_index) = '/';
-                    header(header_index) = ' ';
-                    header_index = header_index + 2;
+                    source(source_index) = '/';
+                    source(source_index) = ' ';
+                    source_index = source_index + 2;
                 else % plain text, no comment starts
-                    header(header_index) = '/';
-                    header(header_index+1) = s(i);
-                    header_index = header_index + 2;
+                    source(source_index) = '/';
+                    source(source_index+1) = s(i);
+                    source_index = source_index + 2;
                 end                    
             case 2
                 if (s(i) == '*') % star in multiline comment (/* *)
@@ -85,8 +91,8 @@ end
             case 3
                 if ( (s(i) == char(13)) || (s(i) == char(10)) ) % new_line, end of single-line comment
                     state = 0;
-                    header(header_index) = ' ';
-                    header_index = header_index + 1;
+                    source(source_index) = ' ';
+                    source_index = source_index + 1;
                 end
             case 4
                 if (s(i) == '/')    % end of multiline comment
@@ -98,161 +104,140 @@ end
             case 5
                 if ( (s(i) == char(13)) || (s(i) == char(10)) ) % new_line, end of define
                     state = 0;
-                    header(header_index) = ' ';
-                    header_index = header_index + 1;
+                    source(source_index) = ' ';
+                    source_index = source_index + 1;
                 end                
         end
     end
     
-    header = header(1:header_index - 1);
-%% split header into sections
-    % first we search first appearance of ( or #
-    app = 0;
-    for index = 1:header_index - 1
-        if ((header(index) == '(') || (header(index) == '#'))
-            app = index;
-            break;
-        end
-    end
     
-    % if no one found - then header is invalid
-    if (app == 0)
-        error('Invalid header: expected ''('' or ''#''');
-    end
+    %% Keep only the module we need as top_module
+    expr = 'module\W.*?endmodule(\s|^)';
+    s = regexp(source, expr, 'match');
     
-    % extract module name
-    head = strtrim(header(1:app-1));
-    if (length(head) < 7)
-        error('Keyword ''module'' expected');
-    else
-        if (~strcmp(head(1:7), 'module '))
-            error('Keyword ''module'' expected');
-        end
-    end
-    old_module_name = strtrim(head(8:end));    
-    
-    
-    parameters = '';
-    if (header(app) == '#')
-        % parse string with parameters
-        bracket_level = 0;
-        first_bracket = 0;
-        last_bracket = 0;
-        for index = app+1:header_index-1
-            if (header(index) == '(')   % ( after # or in equation
-                if (bracket_level == 0)
-                    first_bracket = index;
-                end
-                bracket_level = bracket_level + 1;
-            % after # and ( can be only spaces
-            elseif ((first_bracket == 0) && (header(index) ~= ' ')) 
-                error('Unexpected symbol after ''#''');
-            elseif (header(index) == ')')
-                bracket_level = bracket_level - 1;
-                if (bracket_level == 0)
-                    last_bracket = index;
-                    break;
+    if ~isempty(top_module)
+        expr = 'module\s*(?<n>\w*?)[\s#;(]';
+        for i=1:length(s)
+            e = regexp(s{i}, expr, 'names');
+            if length(e)>0
+                if strcmp(e(1).n, top_module)==1
+                    source = s{i};
                 end
             end
         end
-        parameters = header(first_bracket+1:last_bracket-1);
-        app = last_bracket;
     else
-        app = app - 1;
+        source = s{1}; % If top_module is not specified the first one is used
     end
+    
+    %% extract the module name
+    expr = 'module\s*(?<n>\w*)';
+    name = regexp(source, expr, 'names');
+    
+    if length(name) < 1
+        error('Keyword ''module'' expected');
+    end
+    old_module_name = name(1).n;
 
     
-    % parse second pair of parentheses, with description of inputs/outputs
-    bracket_level = 0;
-    first_bracket = 0;
-    last_bracket = 0;
-    for index = app+1:header_index-1
-        if (header(index) == '(')   % ( after parameters or in equation
-            if (bracket_level == 0)
-                first_bracket = index;
+    %% Extract header and body of the module
+    header = regexp(source, 'module.*?;', 'match');
+    hend   = regexp(source, 'module.*?;', 'end');
+    if length(header)>0
+        header = header{1};
+        body = source(hend(1)+1:end);
+    else
+        header = '';
+        body = source;
+    end
+    
+    %% grep all parameters
+    
+    % % Collect Verilog2001-style parameters
+    plist = {};
+    expr = '#(?<p>\(.*?);';
+    header_params = regexp(header, expr, 'names');
+    param_end = 1;
+    if length(header_params) > 0
+        header_params = header_params(1).p;
+        ind = regexp(header_params, '[()]', 'start');
+        cnt = 0;
+        for i=1:length(ind)
+            if header_params(ind(i)) == '('
+                cnt = cnt + 1;
+            else 
+                cnt = cnt - 1;
             end
-            bracket_level = bracket_level + 1;
-        % after parameters can be only spaces
-        elseif ((first_bracket == 0) && (header(index) ~= ' ')) 
-            error('Unexpected symbol after between description of parameters and inputs/outputs');
-        elseif (header(index) == ')')
-            bracket_level = bracket_level - 1;
-            if (bracket_level == 0)
-                last_bracket = index;
+            if (cnt == 0)
+                header_params = header_params(1:ind(i));
+                param_end = ind(i);
                 break;
             end
         end
     end
-    inouts = header(first_bracket+1:last_bracket-1);
+    header_params = [header_params(2:end-1) ';']; % semicolon is added for regexp unification
+    header_inouts = [header(param_end:end) ';'];
     
-%% parse list of parameters
-    if isempty(parameters)
-        param_list = {};
-    else
-        param_list = regexp(parameters, ',', 'split');
-    end
+    % The rest of module with Verilog95-style parameters
+    source_params = [header_params body];
+    source_inouts = [header_inouts body];
     
-    plist = cell(1, length(param_list));
+    % Split the source to "parameter A,B,... ;" strings
+    expr = 'parameter(?<b>.*?);';
+    rec = regexp(source_params, expr, 'names');
     
-    for index = 1:length(param_list)
-        item = param_list{index};
-        item_parts = regexp(item, '=', 'split');
-        if (length(item_parts) ~= 2)
-            error('Invalid description of parameters');
-        end
-        param_name = strtrim(item_parts{1});
-        % remove word 'parameter' if one exists
-        if (length(param_name) > 9)
-            if (strcmp(param_name(1:10), 'parameter '))
-                param_name = strtrim(param_name(11:end));
+    % Parse each string separately
+    cnt = 1;
+    expr = '\s*(?<n>\w*?)\s*=\s*(?<v>.*)\s*';
+    for i=1:length(rec)
+        item = regexp(rec(i).b, ',', 'split');
+        for j=1:length(item)
+            param = regexp(item(j), expr, 'names');
+            if length(param)>0
+                plist{cnt}.name = param{1}.n;
+                plist{cnt}.value = param{1}.v;
             end
+            fprintf('%3d:  name=%s  value=%s\n', cnt, plist{cnt}.name, plist{cnt}.value);
+            cnt = cnt + 1;
         end
-        param_value = strtrim(item_parts{2});
-        plist{index}.name = param_name;
-        plist{index}.value = param_value;
     end
     
-%% parse list of inouts
-    inouts_list = regexp(inouts, ',', 'split');
-    ilist = cell(1, length(inouts_list));
-    for index = 1:length(inouts_list)
-        % read type of inout (input, output, inout)
-        item = [strtrim(inouts_list{index}) blanks(10)];
-        if (strcmp(item(1:6), 'input '))
+    %% grep all inouts
+    ilist = {};
+    
+    % Split the source to "(input|inout|output) A,B,...;" strings
+    expr = '(?<t>input|inout|output)\s(?<c>[^;]*)';
+    rec = regexp(source_inouts, expr, 'names');
+
+    % Parse each string separately
+    cnt = 1;
+    expr = '\s*(reg|wire)?\s*(?<b>\[[\s\w-:]*\])?\s*(?<n>.*)';
+    for i=1:length(rec)
+        if strcmp(rec(i).t, 'input')
             inout_type = 1;
-        elseif (strcmp(item(1:7), 'output '))
+        elseif strcmp(rec(i).t, 'output')
             inout_type = 2;
-        elseif (strcmp(item(1:6), 'inout '))
+        elseif strcmp(rec(i).t, 'inout')
             inout_type = 3;
         else
-            error('expected ''input'', ''output'' or ''inout'' in description of inouts');
+            % This should never happen
+            fprintf('err_%s_%s_%s_\n', inouts(i).t, inouts(i).b, inouts(i).n)
         end
-        item = [strtrim(item(7:end)) blanks(10)];
-        
-        % remove words 'reg' and 'wire', if any
-        if (strcmp(item(1:4), 'reg ') || strcmp(item(1:5), 'wire '))
-            item = [strtrim(item(5:end)) blanks(10)];
-        end
-        
-        % find brackets
-        if (item(1) == '[')
-            b = strfind(item, ']');
-            if (length(b) ~= 1)
-                error('Distinct number of left and right brackets in inout''s description');
+
+        item = regexp(rec(i).c, ',', 'split');
+        for j=1:length(item)
+            param = regexp(item(j), expr, 'names');
+            if length(param)>0
+                ilist{cnt}.name       = param{1}.n;
+                ilist{cnt}.inout_type = inout_type;
+                ilist{cnt}.brackets   = param{1}.b;
             end
-            brackets = item(1:b(1));
-            item = item(b(1)+1:end);
-        else
-            brackets = '';
+            fprintf('%3d:  name=%s  value=%s\n', cnt, plist{cnt}.name, plist{cnt}.value);
+            cnt = cnt + 1;
         end
-        item = strtrim(item);
         
-        ilist{index}.name = item;
-        ilist{index}.inout_type = inout_type;
-        ilist{index}.brackets = brackets;
     end
     
-%% modify values of parameters according with in parameters
+    %% modify values of parameters according with in parameters
     for i = 1:length(plist)
         param_name = plist{i}.name;
         if (isfield(module_params, param_name))
